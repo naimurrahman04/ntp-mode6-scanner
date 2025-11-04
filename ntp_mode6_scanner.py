@@ -2,17 +2,16 @@
 """
 ntp_mode6_scanner.py
 
-Purpose:
-    Parallel scanner to run NTP Mode-6 (control) queries (mrulist, readlist, monstats, rv, peers)
-    across multiple targets. Optionally run nmap NSE checks (ntp-info, ntp-monlist) if nmap is installed.
+Parallel scanner to run NTP Mode-6 (control) queries (mrulist, readlist, monstats, rv, peers)
+across multiple targets. Optionally run Nmap NSE checks (ntp-info, ntp-monlist) if nmap is installed.
+
+Usage:
+    python3 ntp_mode6_scanner.py --ips-file ips.txt
+    python3 ntp_mode6_scanner.py --ips-file ips.txt --nmap
 
 Outputs:
     ./results/<ip>/<command>.txt
     ./results/summary_<timestamp>.json
-
-Usage:
-    python3 ntp_mode6_scanner.py --ips-file ips.txt
-    python3 ntp_mode6_scanner.py --ips-file ips.txt --concurrency 20 --timeout 8 --nmap
 
 WARNING:
     Only run this script against systems you own or are explicitly authorized to test.
@@ -49,7 +48,7 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 def safe_filename(s: str) -> str:
-    # keep filename safe: remove quotes and replace spaces
+    # keep filename safe: remove quotes and replace spaces/slashes/colons
     return s.replace('"', '').replace(' ', '_').replace('/', '_').replace(':', '_')
 
 def run_subprocess(cmd: str, timeout: int) -> Dict:
@@ -152,6 +151,8 @@ def probe_target(ip: str, out_dir: Path, timeout: int, run_nmap: bool) -> Dict:
                 "out_path": str(nmap_out),
                 "returncode": nres["returncode"],
                 "timed_out": nres["timed_out"],
+                "stdout_snippet": (nres["stdout"][:2000] + "...") if nres["stdout"] and len(nres["stdout"]) > 2000 else nres["stdout"],
+                "stderr_snippet": nres["stderr"][:1000] if nres["stderr"] else "",
             }
         else:
             summary["nmap"] = {"error": "nmap not installed or not on PATH"}
@@ -210,10 +211,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             try:
                 s = fut.result()
                 summaries.append(s)
-                # quick console status
+
+                # safe nmap handling (avoid NoneType.get issue)
                 runs_count = len(s.get("runs", []))
-                nmap_info = "nmap" in s and (s["nmap"].get("error") or s["nmap"].get("returncode"))
-                print(f"[{ip}] done. commands={runs_count} nmap={bool(s.get('nmap'))}")
+                nmap_obj = s.get("nmap")
+                if isinstance(nmap_obj, dict):
+                    # nmap returned structured info (either results or error)
+                    nmap_present = True
+                    nmap_err = nmap_obj.get("error")
+                    nmap_rc = nmap_obj.get("returncode")
+                else:
+                    nmap_present = False
+                    nmap_err = None
+                    nmap_rc = None
+
+                print(f"[{ip}] done. commands={runs_count} nmap={nmap_present} nmap_err={nmap_err} nmap_rc={nmap_rc}")
             except Exception as e:
                 print(f"[{ip}] Unexpected error: {e}", file=sys.stderr)
 
@@ -232,12 +244,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     for s in summaries:
         for r in s.get("runs", []):
             cmdlow = r.get("cmd", "").lower()
-            if "mrulist" in cmdlow or "monlist" in cmdlow or "readlist" in cmdlow:
-                # read the saved file and do simple heuristics
+            if any(x in cmdlow for x in ("mrulist", "monlist", "readlist")):
                 try:
                     with open(r["out_path"], "r", encoding="utf-8") as fh:
                         content = fh.read()
-                        # count IP-like tokens (very simple heuristic)
                         dots = content.count(".")
                         if dots > 30:  # tunable threshold
                             potential_vuln.append({"ip": s["ip"], "cmd": r["cmd"], "out": r["out_path"]})
